@@ -224,19 +224,13 @@ fi
 
 spinner_frames=('|' '/' '-' '\')
 spinner_index=0
-spinner_tick_seconds="0.10"
-spinner_tick_marker="__JVNW_SPINNER_TICK__"
 status_text="Preparing Gradle wrapper..."
 done_message="Command completed."
 compile_started=0
 compile_ok_announced=0
 launch_announced=0
-tests_announced=0
 native_math_announced=0
 audiofx_announced=0
-live_failure_output_seen=0
-launch_live_announced=0
-suppress_status_render=0
 command_label=""
 resolved_target=""
 wrapper_mode="Direct Gradle task"
@@ -340,7 +334,7 @@ emit_hint() {
 emit_raw() {
   local line="$1"
   case "$line" in
-    FAILURE:*|*"Execution failed for task"*|*"What went wrong:"*|*"Caused by:"*|*"BUILD FAILED"*)
+    FAILURE:*|*"Execution failed for task"*|*"What went wrong:"*|*"Caused by:"*|*"Exception"*|*"error:"*|*"BUILD FAILED"*)
       emit_line "$(paint "$tone_error" "$line")"
       ;;
     WARNING:*|*WARN*)
@@ -352,39 +346,23 @@ emit_raw() {
   esac
 }
 
-is_real_error_line() {
-  local line="$1"
-  [[ "$line" == *"Execution failed for task"* ]] && return 0
-  [[ "$line" == *"BUILD FAILED"* ]] && return 0
-  [[ "$line" == FAILURE:* ]] && return 0
-  [[ "$line" == *" What went wrong:"* ]] && return 0
-  [[ "$line" == *"* What went wrong:"* ]] && return 0
-  [[ "$line" == *"Caused by:"* ]] && return 0
-  [[ "$line" == *"Exception"* ]] && return 0
-  [[ "$line" == *": error:"* ]] && return 0
-  [[ "$line" == *" error C"* ]] && return 0
-  [[ "$line" == *"fatal error:"* ]] && return 0
-  return 1
-}
-
 should_surface_line() {
   local line="$1"
   if [[ "$debug_mode" == "1" ]]; then
     return 0
   fi
   case "$line" in
-    "> Task "*)
-      ;;
-    ">"*)
-      return 0
-      ;;
-    *" FAILED"*)
+    FAILURE:*|\
+    *"Execution failed for task"*|\
+    *"What went wrong:"*|\
+    *"Caused by:"*|\
+    *"Exception"*|\
+    *"error:"*|\
+    *" FAILED"*|\
+    *"BUILD FAILED"*)
       return 0
       ;;
   esac
-  if is_real_error_line "$line"; then
-    return 0
-  fi
   return 1
 }
 
@@ -396,24 +374,20 @@ show_failure_summary() {
   fi
 
   emit_error "Command failed after ${elapsed_label}."
-  if [[ "$live_failure_output_seen" -eq 1 ]]; then
-    emit_hint "Failure output was already surfaced above."
-  else
-    emit_section "Relevant output"
+  emit_section "Relevant output"
 
-    local surfaced=0
-    while IFS= read -r line; do
-      if should_surface_line "$line"; then
-        emit_raw "$line"
-        surfaced=1
-      fi
-    done <"$output_log"
-
-    if [[ "$surfaced" -eq 0 ]]; then
-      tail -n 40 "$output_log" | while IFS= read -r line; do
-        emit_raw "$line"
-      done
+  local surfaced=0
+  while IFS= read -r line; do
+    if should_surface_line "$line"; then
+      emit_raw "$line"
+      surfaced=1
     fi
+  done <"$output_log"
+
+  if [[ "$surfaced" -eq 0 ]]; then
+    tail -n 40 "$output_log" | while IFS= read -r line; do
+      emit_raw "$line"
+    done
   fi
 
   emit_hint "Re-run with ./jvnw --raw <same-args> for full Gradle output."
@@ -464,18 +438,7 @@ handle_line() {
         status_text="Finalizing compiled modules..."
       fi
       ;;
-    "> Task :"?*":test"*|"> Task "*:runAudioFxNativeTests*)
-      if [[ "$compile_started" -eq 1 && "$compile_ok_announced" -eq 0 ]]; then
-        emit_info "Compiling submodules OK"
-        compile_ok_announced=1
-      fi
-      if [[ "$tests_announced" -eq 0 ]]; then
-        emit_info "Running tests..."
-        tests_announced=1
-      fi
-      status_text="Running tests..."
-      ;;
-    "> Task :editor:runLauncher"*|"> Task :editor:run"*|"> Task :runtime:run"*)
+    "> Task "*:runLauncher*|"> Task "*:run*)
       if [[ "$compile_started" -eq 1 && "$compile_ok_announced" -eq 0 ]]; then
         emit_info "Compiling submodules OK"
         compile_ok_announced=1
@@ -484,8 +447,6 @@ handle_line() {
         emit_info "Launching..."
         launch_announced=1
       fi
-      suppress_status_render=0
-      launch_live_announced=0
       status_text="Launching..."
       ;;
     WARNING:\ A\ restricted\ method\ in\ java.lang.System\ has\ been\ called*|\
@@ -508,7 +469,6 @@ handle_line() {
       ;;
     *)
       if should_surface_line "$line"; then
-        live_failure_output_seen=1
         emit_raw "$line"
       fi
       ;;
@@ -542,66 +502,25 @@ if [[ -n "$command_label" || -n "$resolved_target" ]]; then
 fi
 
 start_time_epoch="$(date +%s)"
-if [[ "$supports_spinner" -eq 1 ]]; then
-  render_status
-fi
 "${gradle_cmd[@]}" >"$fifo_path" 2>&1 &
 gradle_pid=$!
 
-exec 3< <(
-  perl -e '
-    use strict;
-    use warnings;
-    use IO::Select;
-    $| = 1;
+exec 3<"$fifo_path"
 
-    my ($interval, $tick_marker, $fifo_path) = @ARGV;
-    open my $fh, "<", $fifo_path or die "Unable to open $fifo_path: $!";
-
-    my $selector = IO::Select->new($fh);
-    while (1) {
-      my @ready = $selector->can_read($interval);
-      if (@ready) {
-        my $line = <$fh>;
-        last unless defined $line;
-        $line =~ s/\r?\n\z//;
-        print "$line\n";
-      } else {
-        print "$tick_marker\n";
-      }
-    }
-  ' "$spinner_tick_seconds" "$spinner_tick_marker" "$fifo_path"
-)
-
-while IFS= read -r line <&3; do
-  if [[ "$line" == "$spinner_tick_marker" ]]; then
-    if kill -0 "$gradle_pid" 2>/dev/null; then
-      if [[ "$launch_announced" -eq 1 && "$launch_live_announced" -eq 0 ]]; then
-        clear_status
-        case "$command_label" in
-          launcher)
-            emit_info "Launcher running. Close the launcher window to finish this command."
-            ;;
-          editor)
-            emit_info "Editor running. Close the editor window to finish this command."
-            ;;
-          runtime|run|game)
-            emit_info "Runtime running. Close the runtime window to finish this command."
-            ;;
-          *)
-            emit_info "Application process is running."
-            ;;
-        esac
-        launch_live_announced=1
-        suppress_status_render=1
-      fi
-      if [[ "$suppress_status_render" -eq 0 ]]; then
-        render_status
-      fi
-    fi
-  else
+while true; do
+  if IFS= read -r -t 1 line <&3; then
     printf '%s\n' "$line" >>"$output_log"
     handle_line "$line"
+  else
+    if kill -0 "$gradle_pid" 2>/dev/null; then
+      render_status
+    else
+      while IFS= read -r line <&3; do
+        printf '%s\n' "$line" >>"$output_log"
+        handle_line "$line"
+      done
+      break
+    fi
   fi
 done
 

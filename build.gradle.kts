@@ -141,7 +141,7 @@ tasks.register("buildNativeMathIfNeeded") {
       return@doLast
     }
 
-    val javaHome = resolveNativeMathJavaHome()
+    val javaHome = resolveNativeMathJavaHome().replace("\\", "/")
     val cacheMatchesToolchain = nativeMathCacheMatches(javaHome)
     if (nativeBuildDir.exists() && !cacheMatchesToolchain) {
       logger.lifecycle(
